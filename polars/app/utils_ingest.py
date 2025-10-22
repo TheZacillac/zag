@@ -1,6 +1,15 @@
 """
 Document processing utilities for the RAG system.
-Handles text extraction, chunking, and database storage of documents.
+
+This module handles the first stage of the RAG pipeline: converting documents
+into text chunks ready for embedding. It uses the Unstructured library to extract
+text from various formats (PDF, DOCX, TXT, etc.) and intelligently chunks the
+content for optimal retrieval.
+
+Key design decisions:
+- Chunk size: 800 characters (balances context vs. specificity)
+- Overlap: 100 characters (ensures continuity across chunk boundaries)
+- Word boundary preservation: Prevents splitting words mid-character
 """
 
 import os, re
@@ -10,88 +19,153 @@ from unstructured.partition.auto import partition
 
 def extract_text(path: Path) -> str:
     """
-    Extract text content from various document formats using Unstructured.
-    
+    Extract text content from various document formats using the Unstructured library.
+
+    The Unstructured library automatically detects the file type and applies the
+    appropriate parser (PDF, DOCX, HTML, Markdown, plain text, etc.). It handles
+    complex document structures like tables, headers, and multi-column layouts.
+
     Args:
-        path: Path to the document file
-        
+        path: Path to the document file (can be any format Unstructured supports)
+
     Returns:
-        Cleaned text content with normalized whitespace
+        Cleaned text content with normalized whitespace and excessive newlines removed
+
+    Note: This function filters elements to only those with text content, which
+    excludes images, charts, and other non-textual elements.
     """
+    # Partition the document into semantic elements (paragraphs, titles, etc.)
+    # The auto partitioner detects file type and chooses the appropriate strategy
     elements = partition(filename=str(path))
-    # Normalize excessive newlines and extract text from elements
-    return re.sub(r"\n{3,}", "\n\n", "\n".join([e.text for e in elements if hasattr(e, "text")]).strip())
+
+    # Extract text from each element and join with newlines
+    # Filter to only elements that have text (excludes images, etc.)
+    raw_text = "\n".join([e.text for e in elements if hasattr(e, "text")]).strip()
+
+    # Normalize excessive newlines (3+ newlines become 2 newlines)
+    # This preserves paragraph breaks while removing large empty spaces
+    return re.sub(r"\n{3,}", "\n\n", raw_text)
 
 def chunk_text(text: str, size: int = 800, overlap: int = 100):
     """
-    Split text into overlapping chunks for embedding processing.
-    Respects word boundaries to avoid splitting words mid-character.
+    Split text into overlapping chunks optimized for semantic embedding.
+
+    Chunking strategy:
+    - Target size of 800 chars (roughly 150-200 words) balances:
+      * Large enough: Provides sufficient context for meaningful embeddings
+      * Small enough: Keeps embeddings focused on specific topics
+    - 100 char overlap ensures important information near boundaries isn't lost
+    - Word boundary preservation prevents mid-word splits that harm readability
+
+    The overlap is crucial for RAG systems because:
+    - A query might match text near a chunk boundary
+    - Overlap ensures adjacent chunks share context, improving retrieval recall
 
     Args:
-        text: Input text to chunk
-        size: Maximum chunk size in characters
-        overlap: Number of characters to overlap between chunks
+        text: Input text to chunk (typically from extract_text())
+        size: Target maximum chunk size in characters (default: 800)
+        overlap: Number of characters to overlap between consecutive chunks (default: 100)
 
     Returns:
-        List of text chunks
+        List of text chunks, each ≤ size characters (may be smaller at word boundaries)
+
+    Example:
+        >>> chunk_text("This is a test document with multiple words.", size=20, overlap=5)
+        ['This is a test', 'test document with', 'with multiple', 'multiple words.']
+        # Note the 'test', 'with', and 'multiple' appear in consecutive chunks
     """
     chunks = []
     start = 0
     text_len = len(text)
 
     while start < text_len:
+        # Calculate the end position for this chunk
         end = min(start + size, text_len)
 
-        # If not at the end of text, try to break at word boundary
+        # If we're not at the end of the text, try to break at a word boundary
+        # This prevents splitting words like "understand" into "under" and "stand"
         if end < text_len:
-            # Look backwards for a space to break at
+            # Search backwards from 'end' to 'start' for the last space character
             space_pos = text.rfind(' ', start, end)
-            if space_pos > start + (size // 2):  # Only use space if it's not too far back
-                end = space_pos + 1  # Include the space
 
+            # Only use the space if it's not too far back (at least halfway through chunk)
+            # This prevents creating very small chunks if there are no nearby spaces
+            if space_pos > start + (size // 2):
+                end = space_pos + 1  # Include the space in the chunk
+
+        # Extract the chunk and remove leading/trailing whitespace
         chunk = text[start:end].strip()
-        if chunk:  # Only add non-empty chunks
+        if chunk:  # Only add non-empty chunks (skip whitespace-only chunks)
             chunks.append(chunk)
 
-        # Move start position with overlap for continuity
-        # Ensure we make progress even with small chunks
+        # Move start position for next chunk, accounting for overlap
+        # The max() ensures we always make forward progress, even with small chunks
+        # Without max(), we could get stuck in an infinite loop
         start = max(start + 1, end - overlap)
 
     return chunks
 
 def ingest_file(conn: psycopg.Connection, path: Path):
     """
-    Main ingestion function that processes a document file.
-    
-    Workflow:
-    1. Extract text from document
-    2. Split into chunks
-    3. Store document metadata in database
-    4. Store chunks with placeholder embeddings
-    
+    Main ingestion pipeline: process a document and store it in the database.
+
+    This function is the entry point for document ingestion, called by the
+    /ingest/file API endpoint. It orchestrates the entire ingestion workflow:
+
+    1. Extract text from the document (using Unstructured library)
+    2. Split text into overlapping chunks (800 char with 100 char overlap)
+    3. Create a document record in the database
+    4. Create chunk records linked to the document
+    5. Create embedding placeholder records (NULL until embed_worker processes)
+
+    After this function completes:
+    - embed_worker will pick up chunks with NULL embeddings and populate them
+    - rerank_worker will then calculate rank_score values
+    - The chunks become searchable via the /query endpoint
+
     Args:
-        conn: Database connection
-        path: Path to the document file
+        conn: Database connection (will be committed at the end)
+        path: Path to the document file to ingest
+
+    Database Schema:
+        documents: (id, source_uri, title)
+        chunks: (id, document_id, chunk_index, text)
+        embeddings: (chunk_id, embedding, rank_score)
+
+    Note: This function creates embeddings rows with NULL values, which signals
+    to the embed_worker that these chunks need processing.
     """
-    # Extract and chunk the document text
+    # Step 1: Extract text from the document (handles PDF, DOCX, etc.)
     text = extract_text(path)
+
+    # Step 2: Split into overlapping chunks for embedding
     chunks = chunk_text(text)
 
     with conn.cursor() as cur:
-        # Insert document record and get ID
-        cur.execute("INSERT INTO documents (source_uri, title) VALUES (%s,%s) RETURNING id", (str(path), path.name))
+        # Step 3: Create document record and get its ID
+        # source_uri stores the full path, title stores just the filename
+        cur.execute(
+            "INSERT INTO documents (source_uri, title) VALUES (%s, %s) RETURNING id",
+            (str(path), path.name)
+        )
         doc_id = cur.fetchone()[0]
-        
-        # Insert each chunk with placeholder embedding
+
+        # Step 4 & 5: Create chunk and embedding records
         for i, chunk in enumerate(chunks):
+            # Insert chunk record with its position in the document
             cur.execute(
-                "INSERT INTO chunks (document_id, chunk_index, text) VALUES (%s,%s,%s) RETURNING id",
+                "INSERT INTO chunks (document_id, chunk_index, text) VALUES (%s, %s, %s) RETURNING id",
                 (doc_id, i, chunk),
             )
-            cid = cur.fetchone()[0]
-            # Create embedding placeholder (NULL until embed worker processes it)
+            chunk_id = cur.fetchone()[0]
+
+            # Create embedding placeholder (NULL signals embed_worker to process it)
+            # The embed_worker will UPDATE this row with the actual embedding vector
             cur.execute(
-                "INSERT INTO embeddings (chunk_id, embedding) VALUES (%s,NULL)", (cid,)
+                "INSERT INTO embeddings (chunk_id, embedding) VALUES (%s, NULL)",
+                (chunk_id,)
             )
+
+    # Commit the transaction to make chunks visible to workers
     conn.commit()
     print(f"📥 {path.name}: {len(chunks)} chunks staged (awaiting embedding).")

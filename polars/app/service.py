@@ -25,17 +25,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Request/Response models
+# Request/Response models for API endpoints
 class QueryRequest(BaseModel):
-    query: str
-    top_k: int = 5
+    """Request model for semantic search queries."""
+    query: str  # The user's question or search query
+    top_k: int = 5  # Number of most relevant chunks to return (default: 5)
 
 class ChunkResult(BaseModel):
-    chunk_id: int
-    text: str
-    title: str
-    source_uri: str
-    distance: float
+    """Response model for a single document chunk result."""
+    chunk_id: int  # Unique identifier for the chunk
+    text: str  # The actual text content of the chunk
+    title: str  # Document title for attribution
+    source_uri: str  # Original file path or URI
+    distance: float  # Cosine distance (0 = identical, 2 = opposite)
 
 @app.get("/healthz")
 def health():
@@ -69,17 +71,35 @@ def ingest_file_endpoint(file: UploadFile):
 @app.post("/query")
 async def query_endpoint(req: QueryRequest):
     """
-    RAG query endpoint that finds relevant document chunks.
+    RAG query endpoint that finds relevant document chunks using semantic search.
+
+    This is the core retrieval endpoint for the RAG system. It converts user queries
+    into embeddings and uses pgvector's approximate nearest neighbor (ANN) search
+    to find semantically similar document chunks.
 
     Workflow:
-    1. Embed the query using Ollama
-    2. Search for similar chunks using pgvector
+    1. Embed the query using Ollama's embedding model
+    2. Search for similar chunks using pgvector cosine similarity (<=> operator)
     3. Return top-k most relevant chunks with metadata
+
+    Args:
+        req: QueryRequest containing the query string and optional top_k parameter
+
+    Returns:
+        Dictionary with the original query and a list of matching chunks with:
+        - chunk_id: Unique identifier for the chunk
+        - text: The actual text content of the chunk
+        - title: Document title (for attribution)
+        - source_uri: Original file path or URI
+        - distance: Cosine distance (0 = identical, 2 = opposite)
     """
-    # Get embedding for the query
+    # Step 1: Get embedding vector for the user's query
+    # These settings should match the worker that generates document embeddings
     ollama_host = os.getenv("OLLAMA_HOST", "http://192.168.7.215:11434")
     embed_model = os.getenv("EMBED_MODEL", "embeddinggemma")
 
+    # Call Ollama's embedding API with a 30-second timeout
+    # The API accepts a batch of inputs, but we only need to embed one query
     async with httpx.AsyncClient(timeout=30.0) as client:
         embed_resp = await client.post(
             f"{ollama_host}/api/embed",
@@ -89,12 +109,22 @@ async def query_endpoint(req: QueryRequest):
         embeddings = embed_resp.json().get("embeddings", [])
         if not embeddings:
             return {"error": "Failed to generate query embedding", "chunks": []}
-        query_embedding = embeddings[0]
+        query_embedding = embeddings[0]  # Extract the first (and only) embedding
 
-    # Query database for similar chunks
+    # Step 2: Search for similar chunks using pgvector
     with psycopg.connect(os.getenv("DATABASE_URL")) as conn:
         with conn.cursor() as cur:
-            # Use pgvector cosine similarity search
+            # Use pgvector's <=> operator for cosine distance calculation
+            # This is an approximate nearest neighbor (ANN) search powered by
+            # the HNSW index on embeddings.embedding
+            #
+            # JOIN order matters for performance:
+            # - Start with embeddings table (has vector index)
+            # - JOIN to chunks for text content
+            # - JOIN to documents for metadata
+            #
+            # WHERE clause ensures we only search chunks that have been embedded
+            # ORDER BY distance ensures closest matches come first (lower is better)
             cur.execute("""
                 SELECT
                     e.chunk_id,
@@ -110,6 +140,7 @@ async def query_endpoint(req: QueryRequest):
                 LIMIT %s
             """, (query_embedding, req.top_k))
 
+            # Step 3: Format results into JSON-serializable dictionaries
             results = []
             for row in cur.fetchall():
                 results.append({
@@ -117,7 +148,7 @@ async def query_endpoint(req: QueryRequest):
                     "text": row[1],
                     "title": row[2],
                     "source_uri": row[3],
-                    "distance": float(row[4])
+                    "distance": float(row[4])  # Convert Decimal to float for JSON
                 })
 
     return {"query": req.query, "chunks": results}

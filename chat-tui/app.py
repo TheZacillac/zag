@@ -1,15 +1,29 @@
 """
 RAG Chat TUI - Interactive terminal interface for querying your RAG system
+
+This is a Textual-based terminal user interface that provides an interactive chat
+experience powered by the RAG system. It combines:
+- Document retrieval via the /query endpoint (polars-worker)
+- LLM generation via Ollama's streaming chat API
+- A rich terminal UI with markdown rendering and clipboard support
+
+Key features:
+- Real-time streaming responses (shows text as it's generated)
+- RAG context integration (queries document database for relevant chunks)
+- Model selection (can switch between installed Ollama models)
+- Copy/paste support for messages
+- Keyboard shortcuts for navigation
+- Status indicators for RAG and Ollama connectivity
 """
 
 import os
 import asyncio
 import httpx
 import time
-import pyperclip
+import pyperclip  # Cross-platform clipboard library
 import signal
 import sys
-import termios
+import termios  # Terminal I/O control (for graceful shutdown)
 import tty
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
@@ -20,39 +34,61 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-# Configuration from environment
-POLARS_API = os.getenv("POLARS_API", "http://polars-worker:8080")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://192.168.7.215:11434")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2")
+# Configuration from environment variables
+POLARS_API = os.getenv("POLARS_API", "http://polars-worker:8080")  # RAG query endpoint
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://192.168.7.215:11434")  # Ollama API
+CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2")  # Default LLM model
 
 
 def format_duration(ms: int) -> str:
-    """Format milliseconds into a human-readable duration string"""
+    """
+    Format milliseconds into a human-readable duration string.
+
+    Used in the status bar to show how long the last query took.
+    Automatically scales to appropriate units (ms, s, m, h).
+
+    Args:
+        ms: Duration in milliseconds
+
+    Returns:
+        Formatted string like "123ms", "1.5s", "2m 30.0s", or "1h 15m 30.0s"
+    """
     if ms < 1000:
         return f"{ms}ms"
-    
+
     seconds = ms / 1000
     if seconds < 60:
         return f"{seconds:.1f}s"
-    
+
     minutes = int(seconds // 60)
     remaining_seconds = seconds % 60
     if minutes < 60:
         return f"{minutes}m {remaining_seconds:.1f}s"
-    
+
     hours = int(minutes // 60)
     remaining_minutes = minutes % 60
     return f"{hours}h {remaining_minutes}m {remaining_seconds:.1f}s"
 
 
 class StatusBar(Static):
-    """Status bar showing system status with model selector"""
+    """
+    Status bar showing real-time system health and query performance.
 
-    rag_status = reactive("🔴")
-    ollama_status = reactive("🔴")
-    last_query_time = reactive("--")
-    available_models = reactive([])
-    current_model = reactive(CHAT_MODEL)
+    Displays:
+    - RAG service status (🟢 = healthy, 🔴 = down)
+    - Ollama service status (🟢 = healthy, 🔴 = down)
+    - Last query duration (how long the most recent query took)
+    - Current model name (selected LLM model)
+
+    Uses Textual's reactive properties to automatically update the display
+    when any of these values change.
+    """
+
+    rag_status = reactive("🔴")  # Red circle until first successful RAG query
+    ollama_status = reactive("🔴")  # Red circle until first successful Ollama call
+    last_query_time = reactive("--")  # Shows duration like "1.2s" or "450ms"
+    available_models = reactive([])  # List of models from Ollama API
+    current_model = reactive(CHAT_MODEL)  # Currently selected model
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -84,19 +120,29 @@ class StatusBar(Static):
 
 
 class ThinkingPanel(Static):
-    """Displays the model's thinking process"""
+    """
+    Panel that displays the RAG system's retrieval and generation process.
+
+    Shows step-by-step progress like:
+    • Searching document database...
+    • Found 5 relevant chunks
+    • Generating response with context...
+
+    This gives users visibility into what the system is doing, especially
+    useful when queries take a few seconds to process.
+    """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.steps = []
+        self.steps = []  # List of thinking steps to display
 
     def add_step(self, step: str):
-        """Add a thinking step"""
+        """Add a new thinking step and refresh the display"""
         self.steps.append(step)
         self.update_display()
 
     def update_display(self):
-        """Update the display with current steps"""
+        """Render all thinking steps in a styled panel"""
         content = "\n".join([f"• {step}" for step in self.steps])
         self.update(Panel(
             content,
@@ -106,7 +152,7 @@ class ThinkingPanel(Static):
         ))
 
     def clear_steps(self):
-        """Clear all steps"""
+        """Clear all steps (called when starting a new query)"""
         self.steps = []
 
 
@@ -415,13 +461,18 @@ class RAGChatApp(App):
             ))
 
         try:
-            # Step 1: Embedding query
+            # ===== PHASE 1: RETRIEVAL (RAG Query) =====
+            # Query the polars-worker API to find relevant document chunks
+
             add_thinking_step("📝 Embedding your question...")
 
-            # Step 2: Query RAG for relevant context
             add_thinking_step("🔍 Searching document database...")
             rag_start = time.time()
 
+            # Call the /query endpoint which:
+            # 1. Embeds the user's question
+            # 2. Searches pgvector for similar chunks
+            # 3. Returns top 5 most relevant chunks
             rag_response = await self.client.post(
                 f"{POLARS_API}/query",
                 json={"query": user_msg, "top_k": 5}
@@ -432,15 +483,19 @@ class RAGChatApp(App):
 
             context_chunks = rag_data.get("chunks", [])
 
-            # Build context string
+            # ===== PHASE 2: CONTEXT FORMATTING =====
+            # Format retrieved chunks into context string for LLM
+
             if context_chunks:
                 add_thinking_step(f"✅ Found {len(context_chunks)} relevant chunks ({format_duration(rag_time)})")
 
-                # Show chunk details
+                # Show chunk details with similarity scores
                 chunk_details = []
                 for i, chunk in enumerate(context_chunks, 1):
                     dist = chunk.get('distance', 0)
-                    similarity = (1 - dist) * 100  # Convert distance to similarity percentage
+                    # Convert cosine distance to similarity percentage
+                    # Distance ranges from 0 (identical) to 2 (opposite)
+                    similarity = (1 - dist) * 100
                     chunk_details.append(
                         f"{i}. {chunk['title']} (similarity: {similarity:.1f}%)\n"
                         f"   Preview: {chunk['text'][:100]}..."
@@ -452,6 +507,7 @@ class RAGChatApp(App):
                     border_style="#e5c890"
                 ))
 
+                # Build context string for LLM prompt
                 context = "\n\n".join([
                     f"[Document: {chunk['title']}]\n{chunk['text']}"
                     for chunk in context_chunks
@@ -460,33 +516,38 @@ class RAGChatApp(App):
                 add_thinking_step("⚠️ No relevant context found")
                 context = "No relevant documents found."
 
-            # Step 3: Send to Ollama
+            # ===== PHASE 3: LLM GENERATION (Streaming) =====
+            # Send context + question to Ollama and stream the response
+
             add_thinking_step(f"💭 Generating response with {CHAT_MODEL}...")
 
+            # System prompt instructs LLM to use the provided context
             system_prompt = (
                 "You are a helpful assistant that answers questions based on the provided context. "
                 "Use the context to answer the user's question. If the context doesn't contain "
                 "relevant information, say so honestly."
             )
 
+            # Construct message array for Ollama chat API
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {user_msg}"}
             ]
 
-            # Stream response from Ollama
-            response_text = ""
+            # Stream response from Ollama for real-time display
+            response_text = ""  # Accumulate streamed tokens
             llm_start = time.time()
 
+            # Use streaming mode to show text as it's generated
             async with self.client.stream(
                 "POST",
                 f"{OLLAMA_HOST}/api/chat",
                 json={"model": CHAT_MODEL, "messages": messages, "stream": True}
             ) as stream:
-                # Clear thinking panel
+                # Clear thinking panel now that we're generating
                 chat_log.clear()
 
-                # Re-add user message
+                # Re-add user message to chat
                 chat_log.write(Panel(
                     user_msg,
                     title="[bold cyan]You[/bold cyan]",
@@ -501,7 +562,8 @@ class RAGChatApp(App):
                         border_style="#e5c890"
                     ))
 
-                # Stream tokens
+                # Stream tokens from Ollama's response
+                # Each line is a JSON object with a "message" field containing new tokens
                 async for line in stream.aiter_lines():
                     if line.strip():
                         import json
@@ -509,27 +571,32 @@ class RAGChatApp(App):
                         if "message" in chunk and "content" in chunk["message"]:
                             response_text += chunk["message"]["content"]
 
+            # ===== PHASE 4: DISPLAY FINAL RESPONSE =====
+            # Calculate timing and show complete response
+
             llm_time = int((time.time() - llm_start) * 1000)
             total_time = int((time.time() - self.query_start_time) * 1000)
 
-            # Update status bar
+            # Update status bar with total time
             status_bar.last_query_time = format_duration(total_time)
 
-            # Store for copy
+            # Store for Ctrl+Y copy action
             self.last_response = response_text
 
-            # Show final response with timing
+            # Display final response with timing breakdown
             chat_log.write(Panel(
-                Markdown(response_text),
+                Markdown(response_text),  # Render markdown formatting
                 title=f"[bold #a6d189]🤖 Assistant[/bold #a6d189] (generated in {format_duration(llm_time)}) [dim #838ba7](Ctrl+Y to copy)[/dim #838ba7]",
                 border_style="#a6d189",
                 subtitle=f"[dim #838ba7]Total: {format_duration(total_time)} | RAG: {format_duration(rag_time)} | LLM: {format_duration(llm_time)}[/dim #838ba7]"
             ))
 
         except httpx.HTTPError as e:
+            # HTTP errors (API down, network issues, etc.)
             chat_log.write(f"[#e78284]❌ HTTP Error: {e}[/#e78284]")
             status_bar.last_query_time = "ERROR"
         except Exception as e:
+            # Unexpected errors (parsing issues, etc.)
             chat_log.write(f"[#e78284]❌ Unexpected error: {e}[/#e78284]")
             status_bar.last_query_time = "ERROR"
 
