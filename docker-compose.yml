@@ -1,0 +1,130 @@
+name: rag
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ragdb
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ragpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d ragdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - ragnet
+
+  polars-worker:
+    build:
+      context: ./polars
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://rag:ragpass@db:5432/ragdb
+      OLLAMA_HOST: http://192.168.7.215:11434
+      EMBED_MODEL: embeddinggemma
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./polars/app:/app
+      - ./data:/data
+    networks:
+      - ragnet
+
+  digester:
+    build:
+      context: ./digester
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      polars-worker:
+        condition: service_healthy
+    environment:
+      DIGEST_PATH: /digestion
+      POLARS_API: http://polars-worker:8080
+      PYTHONUNBUFFERED: 1
+    volumes:
+      - ./digestion:/digestion:rw
+    networks:
+      - ragnet
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import os; exit(0 if os.path.exists(\"/digestion\") else 1)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  embedder:
+    build:
+      context: ./polars
+      dockerfile: Dockerfile
+    command: ["python", "-u", "/app/embed_worker.py"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://rag:ragpass@db:5432/ragdb
+      OLLAMA_HOST: http://192.168.7.215:11434
+      EMBED_MODEL: embeddinggemma
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ragnet
+      
+  reranker:
+    build:
+      context: ./polars
+      dockerfile: Dockerfile
+    command: ["python", "-u", "/app/rerank_worker.py"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://rag:ragpass@db:5432/ragdb
+      OLLAMA_HOST: http://192.168.7.215:11434
+      RERANK_MODEL: all-minilm     # Using proper reranking model
+      BATCH_SIZE: 50
+      SLEEP_SEC: 30
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ragnet
+
+  chat-tui:
+    build:
+      context: ./chat-tui
+      dockerfile: Dockerfile
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    environment:
+      POLARS_API: http://polars-worker:8080
+      OLLAMA_HOST: http://192.168.7.215:11434
+      CHAT_MODEL: gpt-oss:120b
+    depends_on:
+      polars-worker:
+        condition: service_healthy
+    networks:
+      - ragnet
+
+volumes:
+  pgdata:
+
+networks:
+  ragnet:
+    driver: bridge

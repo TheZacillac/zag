@@ -1,0 +1,16 @@
+# RAG System Aliases
+# Add these to your ~/.bashrc or ~/.zshrc for even easier access
+
+# Quick RAG Chat TUI
+alias rag-chat='cd /home/zacr/Projects/RAG && ./chat.sh'
+alias rag-quick='cd /home/zacr/Projects/RAG && ./quick-chat.sh'
+
+# RAG System Management
+alias rag-up='cd /home/zacr/Projects/RAG && make up'
+alias rag-down='cd /home/zacr/Projects/RAG && make down'
+alias rag-logs='cd /home/zacr/Projects/RAG && make logs'
+alias rag-status='cd /home/zacr/Projects/RAG && make status'
+
+# Development
+alias rag-dev='cd /home/zacr/Projects/RAG/chat-tui && ./run-local.sh'
+

@@ -1,0 +1,27 @@
+FROM rust:latest AS builder
+
+WORKDIR /app
+
+# Cache dependencies - copy both Cargo files for better caching
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release
+RUN rm -rf src
+
+# Build application
+COPY src ./src
+# Touch main.rs to force rebuild of actual code, not dummy
+RUN touch src/main.rs
+RUN cargo build --release
+
+FROM debian:12-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/digester /usr/local/bin/digester
+
+ENV DIGEST_PATH=/digestion
+
+CMD ["digester"]

@@ -1,0 +1,12 @@
+[package]
+name = "digester"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+ctrlc = "3.4"
+notify = "6.1"
+reqwest = { version = "0.11", features = ["blocking", "multipart"] }
+thiserror = "1.0"
+time = { version = "0.3.30", features = ["macros"] }
