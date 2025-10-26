@@ -319,6 +319,6 @@ fn upload_file(client: &Client, base_url: &str, path: &Path) -> Result<(), Uploa
 fn display_name(path: &Path) -> String {
     path.file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or_else(|| path.to_string_lossy().as_ref())
-        .to_string()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
