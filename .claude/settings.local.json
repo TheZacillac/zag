@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose:*)",
+      "Bash(sudo docker compose:*)",
+      "Bash(sudo docker logs:*)",
+      "Bash(curl:*)",
+      "Bash(netstat:*)",
+      "Bash(ss:*)",
+      "Read(//etc/**)",
+      "Bash(python3:*)",
+      "Bash(PGPASSWORD=ragpass psql:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker inspect:*)",
+      "Read(//home/zacr/**)",
+      "Bash(docker logs:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

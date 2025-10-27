@@ -23,7 +23,7 @@ from typing import Iterable, List, Sequence, Tuple
 # Configuration from environment variables with sensible defaults
 DB_URL = os.getenv("DATABASE_URL")
 OLLAMA = os.getenv("OLLAMA_HOST", "http://192.168.7.215:11434")  # Ollama API endpoint
-EMBED_MODEL = os.getenv("EMBED_MODEL", "embedding-gemma")  # Model must match query embedding
+EMBED_MODEL = os.getenv("EMBED_MODEL", "embeddinggemma")  # Model must match query embedding
 BATCH_SIZE = int(os.getenv("EMBED_BATCH", "64"))  # Chunks to process per iteration
 SLEEP_SEC = int(os.getenv("EMBED_SLEEP", "15"))  # Seconds to wait when no work available
 REQUEST_TIMEOUT = int(os.getenv("EMBED_TIMEOUT", "300"))  # 5-minute timeout for large batches

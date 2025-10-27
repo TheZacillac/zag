@@ -26,11 +26,6 @@ app.add_middleware(
 )
 
 # Request/Response models for API endpoints
-class QueryRequest(BaseModel):
-    """Request model for semantic search queries."""
-    query: str  # The user's question or search query
-    top_k: int = 5  # Number of most relevant chunks to return (default: 5)
-
 class ChunkResult(BaseModel):
     """Response model for a single document chunk result."""
     chunk_id: int  # Unique identifier for the chunk
@@ -68,10 +63,10 @@ def ingest_file_endpoint(file: UploadFile):
     path.unlink(missing_ok=True)
     return {"ingested": file.filename}
 
-@app.post("/query")
-async def query_endpoint(req: QueryRequest):
+@app.get("/search")
+async def search_endpoint(q: str, k: int = 5):
     """
-    RAG query endpoint that finds relevant document chunks using semantic search.
+    RAG search endpoint that finds relevant document chunks using semantic search.
 
     This is the core retrieval endpoint for the RAG system. It converts user queries
     into embeddings and uses pgvector's approximate nearest neighbor (ANN) search
@@ -83,7 +78,8 @@ async def query_endpoint(req: QueryRequest):
     3. Return top-k most relevant chunks with metadata
 
     Args:
-        req: QueryRequest containing the query string and optional top_k parameter
+        q: The search query string
+        k: Number of most relevant chunks to return (default: 5)
 
     Returns:
         Dictionary with the original query and a list of matching chunks with:
@@ -103,7 +99,7 @@ async def query_endpoint(req: QueryRequest):
     async with httpx.AsyncClient(timeout=30.0) as client:
         embed_resp = await client.post(
             f"{ollama_host}/api/embed",
-            json={"model": embed_model, "input": [req.query]}
+            json={"model": embed_model, "input": [q]}
         )
         embed_resp.raise_for_status()
         embeddings = embed_resp.json().get("embeddings", [])
@@ -138,7 +134,7 @@ async def query_endpoint(req: QueryRequest):
                 WHERE e.embedding IS NOT NULL
                 ORDER BY distance
                 LIMIT %s
-            """, (query_embedding, req.top_k))
+            """, (query_embedding, k))
 
             # Step 3: Format results into JSON-serializable dictionaries
             results = []
@@ -151,4 +147,4 @@ async def query_endpoint(req: QueryRequest):
                     "distance": float(row[4])  # Convert Decimal to float for JSON
                 })
 
-    return {"query": req.query, "chunks": results}
+    return {"query": q, "chunks": results}

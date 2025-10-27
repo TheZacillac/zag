@@ -65,7 +65,7 @@ services:
     networks:
       - ragnet
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import os; exit(0 if os.path.exists(\"/digestion\") else 1)'"]
+      test: ["CMD-SHELL", "pgrep -x digester > /dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

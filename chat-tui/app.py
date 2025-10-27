@@ -3,7 +3,7 @@ RAG Chat TUI - Interactive terminal interface for querying your RAG system
 
 This is a Textual-based terminal user interface that provides an interactive chat
 experience powered by the RAG system. It combines:
-- Document retrieval via the /query endpoint (polars-worker)
+- Document retrieval via the /search endpoint (polars-worker)
 - LLM generation via Ollama's streaming chat API
 - A rich terminal UI with markdown rendering and clipboard support
 
@@ -469,13 +469,13 @@ class RAGChatApp(App):
             add_thinking_step("🔍 Searching document database...")
             rag_start = time.time()
 
-            # Call the /query endpoint which:
+            # Call the /search endpoint which:
             # 1. Embeds the user's question
             # 2. Searches pgvector for similar chunks
             # 3. Returns top 5 most relevant chunks
-            rag_response = await self.client.post(
-                f"{POLARS_API}/query",
-                json={"query": user_msg, "top_k": 5}
+            rag_response = await self.client.get(
+                f"{POLARS_API}/search",
+                params={"q": user_msg, "k": 5}
             )
             rag_response.raise_for_status()
             rag_data = rag_response.json()

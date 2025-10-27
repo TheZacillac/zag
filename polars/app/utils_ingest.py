@@ -121,7 +121,7 @@ def ingest_file(conn: psycopg.Connection, path: Path):
     After this function completes:
     - embed_worker will pick up chunks with NULL embeddings and populate them
     - rerank_worker will then calculate rank_score values
-    - The chunks become searchable via the /query endpoint
+    - The chunks become searchable via the /search endpoint
 
     Args:
         conn: Database connection (will be committed at the end)
