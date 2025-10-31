@@ -38,15 +38,26 @@ read -p "Choose option (1-3): " choice
 case $choice in
     1)
         echo -e "${GREEN}🐳 Starting full RAG stack with chat-tui...${NC}"
-        echo "This will start: database, polars-worker, embedder, reranker, and chat-tui"
+        echo "This will start: database, polars-worker, embedder, reranker, digester"
         echo ""
-        docker compose --profile chat up --build
+        echo "Starting backend services..."
+        docker compose up -d db polars-worker embedder reranker digester
+
+        echo ""
+        echo "Waiting for services to be ready..."
+        docker compose up -d --wait polars-worker
+
+        echo ""
+        echo -e "${GREEN}✅ Backend services ready! Launching chat-tui...${NC}"
+        echo "Press Ctrl+C to exit the chat when done."
+        echo ""
+        docker compose run --rm chat-tui
         ;;
     2)
         echo -e "${GREEN}🐳 Starting chat-tui only...${NC}"
         echo "Make sure your RAG services are already running!"
         echo ""
-        docker compose --profile chat run --rm chat-tui
+        docker compose run --rm chat-tui
         ;;
     3)
         echo -e "${GREEN}🐍 Starting with local Python...${NC}"

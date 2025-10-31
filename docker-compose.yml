@@ -112,12 +112,14 @@ services:
       - "host.docker.internal:host-gateway"
 
   chat-tui:
+    profiles:
+      - chat
     build:
       context: ./chat-tui
       dockerfile: Dockerfile
     stdin_open: true
     tty: true
-    restart: unless-stopped
+    restart: "no"
     environment:
       POLARS_API: http://polars-worker:8080
       OLLAMA_HOST: http://host.docker.internal:11434

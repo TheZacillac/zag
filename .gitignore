@@ -96,3 +96,14 @@ dmypy.json
 *.bak
 *.backup
 
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+# Env & build
+.env
+.venv/
+build/
+dist/
+*.egg-info/
