@@ -14,5 +14,5 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://rag:ragpass@db:5432/ragdb
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST", "http://ollama:11434")
 
 # Model configuration for different tasks
-EMBED_MODEL  = os.getenv("EMBED_MODEL", "embedding-gemma")    # Text embedding model
+EMBED_MODEL  = os.getenv("EMBED_MODEL", "embeddinggemma")    # Text embedding model
 RERANK_MODEL = os.getenv("RERANK_MODEL", "all-minilm")       # Reranking model

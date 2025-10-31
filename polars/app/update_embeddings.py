@@ -8,7 +8,7 @@ import os, json, httpx, polars as pl, psycopg
 # Configuration from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://rag:ragpass@db:5432/ragdb")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")  # point to your running Ollama box
-EMBED_MODEL = os.getenv("EMBED_MODEL", "embedding-gemma")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "embeddinggemma")
 
 def fetch_pending(conn, limit=256):
     """

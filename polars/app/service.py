@@ -112,7 +112,7 @@ async def search_endpoint(q: str, k: int = 5):
         with conn.cursor() as cur:
             # Use pgvector's <=> operator for cosine distance calculation
             # This is an approximate nearest neighbor (ANN) search powered by
-            # the HNSW index on embeddings.embedding
+            # the IVFFLAT index on embeddings.embedding
             #
             # JOIN order matters for performance:
             # - Start with embeddings table (has vector index)
