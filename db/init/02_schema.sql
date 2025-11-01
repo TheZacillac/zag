@@ -103,6 +103,33 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_rank_score
   ON embeddings (rank_score DESC NULLS LAST);
 
 -- ============================================
+-- Query Feedback Table
+-- ============================================
+-- Stores user feedback on search results for progressive learning
+-- This enables the system to learn which results are helpful for specific queries
+CREATE TABLE IF NOT EXISTS query_feedback (
+  id            BIGSERIAL PRIMARY KEY,
+  query_text    TEXT NOT NULL,                -- The original user query
+  chunk_id      BIGINT REFERENCES chunks(id) ON DELETE CASCADE,  -- Chunk that was rated
+  was_helpful   BOOLEAN,                      -- User thumbs up/down (NULL = not rated yet)
+  clicked       BOOLEAN DEFAULT FALSE,        -- Whether user clicked/viewed this result
+  created_at    TIMESTAMPTZ DEFAULT NOW()     -- When feedback was recorded
+);
+
+-- Index for efficient query feedback lookups
+CREATE INDEX IF NOT EXISTS idx_feedback_query
+  ON query_feedback(query_text);
+
+-- Index for efficient chunk feedback aggregation
+CREATE INDEX IF NOT EXISTS idx_feedback_chunk
+  ON query_feedback(chunk_id);
+
+-- Index for finding helpful results
+CREATE INDEX IF NOT EXISTS idx_feedback_helpful
+  ON query_feedback(chunk_id, was_helpful)
+  WHERE was_helpful IS NOT NULL;
+
+-- ============================================
 -- Convenience Views
 -- ============================================
 

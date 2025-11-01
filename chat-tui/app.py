@@ -317,6 +317,8 @@ class RAGChatApp(App):
         Binding("ctrl+u", "copy_last_user", "Copy Last User Message"),
         Binding("ctrl+v", "paste", "Paste"),
         Binding("ctrl+a", "select_all", "Select All"),
+        Binding("ctrl+t", "thumbs_up", "Thumbs Up (helpful)"),
+        Binding("ctrl+d", "thumbs_down", "Thumbs Down (not helpful)"),
     ]
 
     def __init__(self):
@@ -329,6 +331,9 @@ class RAGChatApp(App):
         self.chat_model = DEFAULT_CHAT_MODEL  # Current model (instance variable)
         self.available_models = [DEFAULT_CHAT_MODEL]  # Available models from Ollama
         self.mode = DEFAULT_MODE  # Current chat mode (rag, hybrid, or chat)
+        # Feedback tracking for progressive learning
+        self.last_query = ""  # Last query text for feedback
+        self.last_chunks = []  # Last retrieved chunks for feedback
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -381,6 +386,8 @@ class RAGChatApp(App):
                 "  • Ctrl+A to select all text in input\n"
                 "  • Ctrl+L to clear chat\n"
                 "  • Ctrl+C to quit\n"
+                "  • Ctrl+T for thumbs up (helpful response)\n"
+                "  • Ctrl+D for thumbs down (not helpful)\n"
                 "  • /models to list available models\n"
                 "  • /model <name> to change model\n"
                 "  • /mode to see available modes\n"
@@ -560,8 +567,10 @@ class RAGChatApp(App):
             input_widget.value = ""
             return
 
-        # Store user message for copying
+        # Store user message for copying and feedback
         self.last_user_message = user_msg
+        self.last_query = user_msg  # Store for feedback
+        self.last_chunks = []  # Reset chunks for new query
 
         # Clear input
         input_widget.value = ""
@@ -620,6 +629,7 @@ class RAGChatApp(App):
                 rag_time = int((time.time() - rag_start) * 1000)
 
                 context_chunks = rag_data.get("chunks", [])
+                self.last_chunks = context_chunks  # Store for feedback
 
                 # ===== PHASE 2: CONTEXT FORMATTING =====
                 # Format retrieved chunks into context string for LLM
@@ -848,6 +858,64 @@ class RAGChatApp(App):
         else:
             chat_log = self.query_one("#chat-container", RichLog)
             chat_log.write("[#e5c890]⚠️ No user message to copy yet[/#e5c890]")
+
+    def action_thumbs_up(self) -> None:
+        """Mark last response as helpful (thumbs up)"""
+        self.run_worker(self.send_feedback(was_helpful=True))
+
+    def action_thumbs_down(self) -> None:
+        """Mark last response as not helpful (thumbs down)"""
+        self.run_worker(self.send_feedback(was_helpful=False))
+
+    async def send_feedback(self, was_helpful: bool) -> None:
+        """
+        Send feedback for all chunks in the last response.
+
+        Args:
+            was_helpful: True for thumbs up, False for thumbs down
+        """
+        chat_log = self.query_one("#chat-container", RichLog)
+
+        if not self.last_query:
+            chat_log.write("[#e5c890]⚠️ No query to provide feedback for yet[/#e5c890]")
+            return
+
+        if not self.last_chunks:
+            chat_log.write("[#e5c890]⚠️ No chunks were retrieved for this query[/#e5c890]")
+            return
+
+        try:
+            # Send feedback for each chunk that was returned
+            feedback_count = 0
+            for chunk in self.last_chunks:
+                chunk_id = chunk.get("chunk_id")
+                if chunk_id:
+                    response = await self.client.post(
+                        f"{POLARS_API}/feedback",
+                        json={
+                            "query": self.last_query,
+                            "chunk_id": chunk_id,
+                            "was_helpful": was_helpful,
+                            "clicked": True  # Assume they saw it if they're rating it
+                        }
+                    )
+                    if response.status_code == 200:
+                        feedback_count += 1
+
+            # Show success message
+            emoji = "👍" if was_helpful else "👎"
+            helpful_text = "helpful" if was_helpful else "not helpful"
+            chat_log.write(
+                f"[#a6d189]✓ {emoji} Feedback recorded: {feedback_count} chunk(s) marked as {helpful_text}[/#a6d189]"
+            )
+            chat_log.write(
+                "[#8bd5ca]💡 Your feedback helps improve future search results![/#8bd5ca]"
+            )
+
+        except httpx.HTTPError as e:
+            chat_log.write(f"[#e78284]❌ Failed to send feedback: {e}[/#e78284]")
+        except Exception as e:
+            chat_log.write(f"[#e78284]❌ Unexpected error: {e}[/#e78284]")
 
     def copy_message(self, message_text: str, message_type: str = "message") -> None:
         """Copy a specific message to clipboard"""

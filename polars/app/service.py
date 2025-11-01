@@ -41,6 +41,13 @@ class ChunkResult(BaseModel):
     source_uri: str  # Original file path or URI
     distance: float  # Cosine distance (0 = identical, 2 = opposite)
 
+class FeedbackRequest(BaseModel):
+    """Request model for user feedback on search results."""
+    query: str  # The original user query
+    chunk_id: int  # Chunk that was rated or clicked
+    was_helpful: bool | None = None  # Thumbs up/down (None = just tracking click)
+    clicked: bool = False  # Whether user viewed this result
+
 @app.get("/healthz")
 def health():
     """Health check endpoint for service monitoring."""
@@ -68,6 +75,59 @@ async def list_models():
             }
     except (httpx.HTTPError, ValueError) as e:
         return {"error": f"Failed to fetch models: {str(e)}", "models": [], "default": ""}
+
+@app.post("/feedback")
+async def record_feedback(feedback: FeedbackRequest):
+    """
+    Record user feedback on search results for progressive learning.
+
+    This endpoint enables the system to learn from user interactions by tracking:
+    - Which results users find helpful (thumbs up/down)
+    - Which results users click on (implicit relevance signal)
+
+    The feedback is used to improve future search rankings by blending:
+    - Semantic similarity (cosine distance)
+    - Reranker scores
+    - User feedback scores (aggregated helpfulness)
+
+    Args:
+        feedback: FeedbackRequest containing query, chunk_id, and feedback signals
+
+    Returns:
+        Success message or error details
+    """
+    try:
+        # Validate chunk_id exists
+        with psycopg.connect(
+            os.getenv("DATABASE_URL"),
+            connect_timeout=10,
+            options="-c statement_timeout=5000"
+        ) as conn:
+            with conn.cursor() as cur:
+                # Verify chunk exists
+                cur.execute("SELECT 1 FROM chunks WHERE id = %s", (feedback.chunk_id,))
+                if not cur.fetchone():
+                    return {"error": f"Chunk ID {feedback.chunk_id} not found"}
+
+                # Insert feedback record
+                cur.execute("""
+                    INSERT INTO query_feedback (query_text, chunk_id, was_helpful, clicked)
+                    VALUES (%s, %s, %s, %s)
+                """, (feedback.query, feedback.chunk_id, feedback.was_helpful, feedback.clicked))
+
+                conn.commit()
+
+        return {
+            "status": "recorded",
+            "query": feedback.query,
+            "chunk_id": feedback.chunk_id,
+            "was_helpful": feedback.was_helpful,
+            "clicked": feedback.clicked
+        }
+    except psycopg.OperationalError as e:
+        return {"error": f"Database connection error: {str(e)}"}
+    except Exception as e:
+        return {"error": f"Failed to record feedback: {str(e)}"}
 
 @app.post("/ingest/file")
 def ingest_file_endpoint(file: UploadFile):
@@ -210,27 +270,49 @@ async def search_endpoint(q: str, k: int = 5):
                 # This is an approximate nearest neighbor (ANN) search powered by
                 # the IVFFLAT index on embeddings.embedding
                 #
+                # Enhanced ranking strategy (Phase 1 Progressive Learning):
+                # - 50% semantic similarity (1 - cosine distance)
+                # - 30% reranker score (precomputed document relevance)
+                # - 20% user feedback score (aggregated helpfulness from interactions)
+                #
                 # JOIN order matters for performance:
                 # - Start with embeddings table (has vector index)
                 # - JOIN to chunks for text content
                 # - JOIN to documents for metadata
+                # - LEFT JOIN feedback for progressive learning signals
                 #
                 # WHERE clause ensures we only search chunks that have been embedded
-                # ORDER BY distance ensures closest matches come first (lower is better)
+                # ORDER BY blended score ensures best results come first (higher is better)
                 cur.execute("""
                     SELECT
                         e.chunk_id,
                         c.text,
                         d.title,
                         d.source_uri,
-                        e.embedding <=> %s::vector AS distance
+                        e.embedding <=> %s::vector AS distance,
+                        COALESCE(
+                            (SELECT AVG(CASE WHEN was_helpful THEN 1.0 ELSE 0.0 END)
+                             FROM query_feedback
+                             WHERE chunk_id = e.chunk_id AND was_helpful IS NOT NULL),
+                            0.5
+                        ) AS feedback_score,
+                        (
+                            0.5 * (1 - (e.embedding <=> %s::vector)) +  -- 50 percent semantic similarity
+                            0.3 * COALESCE(e.rank_score, 0.5) +         -- 30 percent rerank score
+                            0.2 * COALESCE(
+                                (SELECT AVG(CASE WHEN was_helpful THEN 1.0 ELSE 0.0 END)
+                                 FROM query_feedback
+                                 WHERE chunk_id = e.chunk_id AND was_helpful IS NOT NULL),
+                                0.5
+                            )                                            -- 20 percent user feedback
+                        ) AS blended_score
                     FROM embeddings e
                     JOIN chunks c ON c.id = e.chunk_id
                     JOIN documents d ON d.id = c.document_id
                     WHERE e.embedding IS NOT NULL
-                    ORDER BY distance
+                    ORDER BY blended_score DESC
                     LIMIT %s
-                """, (query_vector, k))
+                """, (query_vector, query_vector, k))
 
                 # Step 3: Format results into JSON-serializable dictionaries
                 results = []
@@ -240,7 +322,9 @@ async def search_endpoint(q: str, k: int = 5):
                         "text": row[1],
                         "title": row[2],
                         "source_uri": row[3],
-                        "distance": float(row[4])  # Convert Decimal to float for JSON
+                        "distance": float(row[4]),  # Cosine distance (0-2)
+                        "feedback_score": float(row[5]) if row[5] is not None else 0.5,  # User feedback (0-1)
+                        "blended_score": float(row[6])  # Combined ranking score (0-1)
                     })
 
         return {"query": q, "chunks": results}
@@ -313,7 +397,7 @@ async def answer_endpoint(request: dict):
     except (httpx.HTTPError, ValueError) as e:
         return {"error": f"Failed to generate embeddings: {str(e)}", "chunks": []}
 
-    # Step 2: Search for similar chunks
+    # Step 2: Search for similar chunks (using same feedback-enhanced ranking as /search)
     try:
         with psycopg.connect(
             os.getenv("DATABASE_URL"),
@@ -327,14 +411,30 @@ async def answer_endpoint(request: dict):
                         c.text,
                         d.title,
                         d.source_uri,
-                        e.embedding <=> %s::vector AS distance
+                        e.embedding <=> %s::vector AS distance,
+                        COALESCE(
+                            (SELECT AVG(CASE WHEN was_helpful THEN 1.0 ELSE 0.0 END)
+                             FROM query_feedback
+                             WHERE chunk_id = e.chunk_id AND was_helpful IS NOT NULL),
+                            0.5
+                        ) AS feedback_score,
+                        (
+                            0.5 * (1 - (e.embedding <=> %s::vector)) +
+                            0.3 * COALESCE(e.rank_score, 0.5) +
+                            0.2 * COALESCE(
+                                (SELECT AVG(CASE WHEN was_helpful THEN 1.0 ELSE 0.0 END)
+                                 FROM query_feedback
+                                 WHERE chunk_id = e.chunk_id AND was_helpful IS NOT NULL),
+                                0.5
+                            )
+                        ) AS blended_score
                     FROM embeddings e
                     JOIN chunks c ON c.id = e.chunk_id
                     JOIN documents d ON d.id = c.document_id
                     WHERE e.embedding IS NOT NULL
-                    ORDER BY distance
+                    ORDER BY blended_score DESC
                     LIMIT %s
-                """, (query_vector, k))
+                """, (query_vector, query_vector, k))
 
                 chunks = []
                 for row in cur.fetchall():
@@ -343,7 +443,9 @@ async def answer_endpoint(request: dict):
                         "text": row[1],
                         "title": row[2],
                         "source_uri": row[3],
-                        "distance": float(row[4])
+                        "distance": float(row[4]),
+                        "feedback_score": float(row[5]) if row[5] is not None else 0.5,
+                        "blended_score": float(row[6])
                     })
     except psycopg.Error as e:
         return {"error": f"Database error: {str(e)}", "chunks": []}
