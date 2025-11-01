@@ -283,36 +283,43 @@ async def search_endpoint(q: str, k: int = 5):
                 #
                 # WHERE clause ensures we only search chunks that have been embedded
                 # ORDER BY blended score ensures best results come first (higher is better)
+                # Optimized query using CTE to calculate distance and feedback once
                 cur.execute("""
-                    SELECT
-                        e.chunk_id,
-                        c.text,
-                        d.title,
-                        d.source_uri,
-                        e.embedding <=> %s::vector AS distance,
-                        COALESCE(
-                            (SELECT AVG(CASE WHEN was_helpful THEN 1.0 ELSE 0.0 END)
-                             FROM query_feedback
-                             WHERE chunk_id = e.chunk_id AND was_helpful IS NOT NULL),
-                            0.5
-                        ) AS feedback_score,
-                        (
-                            0.5 * (1 - (e.embedding <=> %s::vector)) +  -- 50 percent semantic similarity
-                            0.3 * COALESCE(e.rank_score, 0.5) +         -- 30 percent rerank score
-                            0.2 * COALESCE(
+                    WITH scored_chunks AS (
+                        SELECT
+                            e.chunk_id,
+                            c.text,
+                            d.title,
+                            d.source_uri,
+                            e.embedding <=> %s::vector AS distance,
+                            COALESCE(e.rank_score, 0.5) AS rank_score,
+                            COALESCE(
                                 (SELECT AVG(CASE WHEN was_helpful THEN 1.0 ELSE 0.0 END)
                                  FROM query_feedback
                                  WHERE chunk_id = e.chunk_id AND was_helpful IS NOT NULL),
                                 0.5
-                            )                                            -- 20 percent user feedback
+                            ) AS feedback_score
+                        FROM embeddings e
+                        JOIN chunks c ON c.id = e.chunk_id
+                        JOIN documents d ON d.id = c.document_id
+                        WHERE e.embedding IS NOT NULL
+                    )
+                    SELECT
+                        chunk_id,
+                        text,
+                        title,
+                        source_uri,
+                        distance,
+                        feedback_score,
+                        (
+                            0.5 * (1 - distance) +      -- 50 percent semantic similarity
+                            0.3 * rank_score +           -- 30 percent rerank score
+                            0.2 * feedback_score         -- 20 percent user feedback
                         ) AS blended_score
-                    FROM embeddings e
-                    JOIN chunks c ON c.id = e.chunk_id
-                    JOIN documents d ON d.id = c.document_id
-                    WHERE e.embedding IS NOT NULL
+                    FROM scored_chunks
                     ORDER BY blended_score DESC
                     LIMIT %s
-                """, (query_vector, query_vector, k))
+                """, (query_vector, k))
 
                 # Step 3: Format results into JSON-serializable dictionaries
                 results = []

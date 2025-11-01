@@ -74,6 +74,82 @@ def format_duration(ms: int) -> str:
     return f"{hours}h {remaining_minutes}m {remaining_seconds:.1f}s"
 
 
+def analyze_question_complexity(question: str) -> int:
+    """
+    Analyze question complexity and return appropriate number of chunks to retrieve.
+
+    Uses multiple heuristics to determine complexity:
+    - Question length
+    - Complexity keywords (compare, analyze, explain, etc.)
+    - Multiple sub-questions
+    - Depth indicators (in detail, comprehensive, all)
+
+    Args:
+        question: The user's question
+
+    Returns:
+        Number of chunks to retrieve (3-15)
+    """
+    question_lower = question.lower()
+
+    # Start with base score
+    complexity_score = 0
+
+    # Factor 1: Length (longer questions tend to be more complex)
+    word_count = len(question.split())
+    if word_count > 30:
+        complexity_score += 3
+    elif word_count > 20:
+        complexity_score += 2
+    elif word_count > 10:
+        complexity_score += 1
+
+    # Factor 2: Complexity keywords
+    complexity_keywords = {
+        'compare': 2, 'contrast': 2, 'difference': 2, 'versus': 2, 'vs': 2,
+        'analyze': 2, 'analysis': 2, 'examine': 2, 'evaluate': 2,
+        'explain': 1, 'describe': 1, 'how does': 1, 'why does': 1,
+        'relationship': 2, 'impact': 1, 'effect': 1, 'affect': 1,
+        'comprehensive': 2, 'detailed': 2, 'in detail': 2, 'thorough': 2,
+        'all': 1, 'every': 1, 'each': 1, 'multiple': 1,
+        'list': 1, 'summarize': 1, 'overview': 1
+    }
+
+    for keyword, score in complexity_keywords.items():
+        if keyword in question_lower:
+            complexity_score += score
+
+    # Factor 3: Multiple questions (question marks or conjunctions)
+    question_marks = question.count('?')
+    if question_marks > 2:
+        complexity_score += 2
+    elif question_marks > 1:
+        complexity_score += 1
+
+    # Factor 4: Multi-part indicators
+    multipart_words = ['and', 'also', 'additionally', 'furthermore', 'moreover']
+    multipart_count = sum(1 for word in multipart_words if f' {word} ' in question_lower)
+    complexity_score += min(multipart_count, 2)
+
+    # Convert complexity score to chunk count
+    # Simple: 0-2 → 3 chunks
+    # Medium: 3-5 → 5 chunks
+    # Complex: 6-8 → 8 chunks
+    # Very Complex: 9+ → 12 chunks
+    # Extremely Complex: 12+ → 15 chunks
+
+    if complexity_score <= 2:
+        return 3
+    elif complexity_score <= 5:
+        return 5
+    elif complexity_score <= 8:
+        return 8
+    elif complexity_score <= 11:
+        return 12
+    else:
+        return 15
+
+
 class StatusBar(Static):
     """
     Status bar showing real-time system health and query performance.
@@ -341,7 +417,7 @@ class RAGChatApp(App):
         
         # Model selector bar (simplified - just show current model and mode)
         with Horizontal(id="model-bar"):
-            yield Static(f"Model: {self.chat_model}", classes="model-label")
+            yield Static(f"Model: {self.chat_model}", id="model-label", classes="model-label")
             yield Static(f"Mode: {self.mode}", id="mode-label", classes="model-label")
             yield Static("(Type '/model <name>' or '/mode <mode>' to change)", classes="model-hint")
 
@@ -463,30 +539,32 @@ class RAGChatApp(App):
         if user_msg.startswith("/model "):
             new_model = user_msg[7:].strip()  # Remove "/model " prefix
             if new_model:
-                # Check if model is available
-                if new_model in self.available_models:
-                    self.chat_model = new_model
-                    self.sub_title = f"🤖 {self.chat_model}"
+                try:
+                    # Check if model is available
+                    if new_model in self.available_models:
+                        self.chat_model = new_model
+                        self.sub_title = f"🤖 {self.chat_model}"
 
-                    # Update the model display
-                    model_bar = self.query_one("#model-bar", Horizontal)
-                    model_label = model_bar.query_one(".model-label", Static)
-                    model_label.update(f"Model: {self.chat_model}")
+                        # Update the model display (use ID selector, not class)
+                        model_label = self.query_one("#model-label", Static)
+                        model_label.update(f"Model: {self.chat_model}")
 
-                    # Notify user
-                    chat_log = self.query_one("#chat-container", RichLog)
-                    chat_log.write(f"[#a6d189]✓ Model changed to: {self.chat_model}[/#a6d189]")
-                else:
-                    # Model not found - show warning and available models
-                    chat_log = self.query_one("#chat-container", RichLog)
-                    chat_log.write(f"[#e5c890]⚠️ Model '{new_model}' not found in Ollama[/#e5c890]")
-                    chat_log.write("[#8bd5ca]💡 Use '/models' to see available models[/#8bd5ca]")
+                        # Notify user
+                        chat_log.write(f"[#a6d189]✓ Model changed to: {self.chat_model}[/#a6d189]")
+                    else:
+                        # Model not found - show warning and available models
+                        chat_log.write(f"[#e5c890]⚠️ Model '{new_model}' not found in Ollama[/#e5c890]")
+                        chat_log.write("[#8bd5ca]💡 Use '/models' to see available models[/#8bd5ca]")
+                except Exception as e:
+                    # Catch any errors during model change
+                    chat_log.write(f"[#e78284]❌ Error changing model: {e}[/#e78284]")
+                    import traceback
+                    traceback.print_exc()
 
                 # Clear input and return
                 input_widget.value = ""
                 return
             else:
-                chat_log = self.query_one("#chat-container", RichLog)
                 chat_log.write("[#e5c890]⚠️ Usage: /model <model_name>[/#e5c890]")
                 chat_log.write("[#8bd5ca]💡 Use '/models' to see available models[/#8bd5ca]")
                 input_widget.value = ""
@@ -613,16 +691,20 @@ class RAGChatApp(App):
                 # RAG or HYBRID mode: Query the document database
                 add_thinking_step("📝 Embedding your question...")
 
+                # Analyze question complexity to determine optimal chunk count
+                chunk_count = analyze_question_complexity(user_msg)
+                add_thinking_step(f"🧮 Question complexity → retrieving {chunk_count} chunks")
+
                 add_thinking_step("🔍 Searching document database...")
                 rag_start = time.time()
 
                 # Call the /search endpoint which:
                 # 1. Embeds the user's question
                 # 2. Searches pgvector for similar chunks
-                # 3. Returns top 5 most relevant chunks
+                # 3. Returns top N most relevant chunks (dynamically determined)
                 rag_response = await self.client.get(
                     f"{POLARS_API}/search",
-                    params={"q": user_msg, "k": 5}
+                    params={"q": user_msg, "k": chunk_count}
                 )
                 rag_response.raise_for_status()
                 rag_data = rag_response.json()
