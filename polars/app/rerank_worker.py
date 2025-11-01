@@ -18,6 +18,7 @@ Performance optimization: The worker interleaves query and document embeddings i
 single batch API call, reducing latency by ~50% compared to separate calls.
 """
 
+import logging
 import math
 import os
 import time
@@ -27,8 +28,17 @@ import httpx
 import psycopg
 from psycopg_pool import ConnectionPool
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Configuration from environment variables with sensible defaults
 DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise ValueError("DATABASE_URL environment variable is required")
 OLLAMA = os.getenv("OLLAMA_HOST", "http://192.168.7.215:11434")  # Ollama API endpoint
 MODEL = os.getenv("RERANK_MODEL", "all-minilm")  # Can be different from main embedding model
 BATCH = int(os.getenv("BATCH_SIZE", "50"))  # Chunks to rerank per iteration
@@ -138,8 +148,10 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     magnitude_a = math.sqrt(sum(x * x for x in a))
     magnitude_b = math.sqrt(sum(x * x for x in b))
 
-    # Avoid division by zero for null vectors
-    if magnitude_a == 0 or magnitude_b == 0:
+    # Avoid division by zero for null vectors with epsilon tolerance
+    EPSILON = 1e-10
+    if magnitude_a < EPSILON or magnitude_b < EPSILON:
+        logger.warning("Near-zero vector magnitude detected in cosine similarity calculation")
         return 0.0
 
     # Cosine similarity = dot product / (magnitude_a * magnitude_b)
@@ -188,10 +200,11 @@ def main():
     - Ollama processes [q1, c1, q2, c2, ...] and returns embeddings in same order
     - We split results using even/odd indices: [0::2] for queries, [1::2] for chunks
     """
-    print(f"🎯 Reranker worker started using {MODEL} (timeout={REQUEST_TIMEOUT}s)")
+    logger.info(f"🎯 Reranker worker started using {MODEL} (timeout={REQUEST_TIMEOUT}s)")
 
-    # Use connection pooling for efficient database access
-    with ConnectionPool(DB_URL, min_size=1, max_size=4) as pool:
+    # Use connection pooling for efficient database access with 30s acquisition timeout
+    # The timeout prevents deadlocks under high load
+    with ConnectionPool(DB_URL, min_size=1, max_size=4, timeout=30) as pool:
         with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
             while True:
                 try:
@@ -247,24 +260,25 @@ def main():
 
                         # Step 6: Write scores to database and commit
                         update_scores(conn, ids, scores)
-                        print(f"✅ Reranked {len(ids)} chunks.")
+                        logger.info(f"✅ Reranked {len(ids)} chunks.")
 
                 # Error handling: Different strategies for different error types
                 except httpx.TimeoutException as e:
                     # Ollama is slow but likely still working - short retry delay
-                    print(f"⏱️ Reranking timeout (model may be slow): {e}")
+                    logger.warning(f"⏱️ Reranking timeout (model may be slow): {e}")
                     time.sleep(SLEEP)
                 except httpx.HTTPError as e:
                     # Network or Ollama API error - longer delay before retry
-                    print(f"🌐 HTTP error communicating with Ollama: {e}")
+                    logger.error(f"🌐 HTTP error communicating with Ollama: {e}")
                     time.sleep(30)
                 except psycopg.OperationalError as e:
                     # Database connection issue - longer delay before retry
-                    print(f"💾 Database connection error: {e}")
+                    logger.error(f"💾 Database connection error: {e}")
                     time.sleep(30)
                 except Exception as e:
-                    # Unexpected error - log and continue with moderate delay
-                    print(f"💥 Unexpected error: {e}")
+                    # Unexpected error - log with traceback and continue with moderate delay
+                    chunk_preview = ids[:5] if 'ids' in locals() else 'unknown'
+                    logger.exception(f"💥 Unexpected error processing chunks {chunk_preview}: {e}")
                     time.sleep(10)
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ This is a utility script for batch processing chunks that don't have embeddings 
 
 import os, json, httpx, polars as pl, psycopg
 
+from vector_utils import to_pgvector
+
 # Configuration from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://rag:ragpass@db:5432/ragdb")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")  # point to your running Ollama box
@@ -34,10 +36,10 @@ def fetch_pending(conn, limit=256):
 def embed(texts):
     """
     Generate embeddings for a list of texts using Ollama.
-    
+
     Args:
         texts: List of text strings to embed
-        
+
     Returns:
         List of embedding vectors (list[list[float]])
     """
@@ -46,7 +48,10 @@ def embed(texts):
         r = client.post(f"{OLLAMA_HOST}/api/embed", json=payload)
         r.raise_for_status()
         data = r.json()
-        return data["embeddings"]  # list[list[float]]
+        embeddings = data.get("embeddings")
+        if not embeddings:
+            raise ValueError("No embeddings returned from API")
+        return embeddings  # list[list[float]]
 
 def write_back(conn, ids, vecs):
     """
@@ -59,7 +64,10 @@ def write_back(conn, ids, vecs):
     """
     with conn.cursor() as cur:
         for cid, v in zip(ids, vecs):
-            cur.execute("UPDATE embeddings SET embedding = %s WHERE chunk_id = %s", (v, cid))
+            cur.execute(
+                "UPDATE embeddings SET embedding = %s::vector WHERE chunk_id = %s",
+                (to_pgvector(v), cid),
+            )
     conn.commit()
 
 if __name__ == "__main__":

@@ -187,14 +187,14 @@ fn main() -> Result<()> {
                         let settings = settings.clone();
                         let processed = processed.clone();
                         thread::spawn(move || {
-                            if let Err(err) = handle_file(settings.as_ref(), client.as_ref(), &path)
-                            {
+                            let result =
+                                handle_file(settings.as_ref(), client.as_ref(), &path);
+                            if let Err(err) = result {
                                 // Upload failed after all retries - remove from processed set
                                 // so it can be retried if the file is modified again
                                 eprintln!("💥 {} error: {err}", display_name(&path));
-                                processed.lock().unwrap().remove(&path);
                             } else {
-                                // Upload succeeded - log with timestamp
+                                // Upload succeeded - log success with timestamp
                                 let timestamp = OffsetDateTime::now_utc()
                                     .format(format_description!(
                                         "[year]-[month]-[day] [hour]:[minute]:[second]"
@@ -202,6 +202,8 @@ fn main() -> Result<()> {
                                     .unwrap_or_else(|_| OffsetDateTime::now_utc().to_string());
                                 println!("✅ {} processed at {}", display_name(&path), timestamp);
                             }
+                            // Allow future files with the same name to be processed
+                            processed.lock().unwrap().remove(&path);
                         });
                     }
                 }

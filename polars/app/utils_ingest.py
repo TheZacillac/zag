@@ -12,10 +12,18 @@ Key design decisions:
 - Word boundary preservation: Prevents splitting words mid-character
 """
 
+import logging
 import os, re
 import psycopg
 from pathlib import Path
 from unstructured.partition.auto import partition
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def extract_text(path: Path) -> str:
     """
@@ -74,6 +82,12 @@ def chunk_text(text: str, size: int = 800, overlap: int = 100):
         ['This is a test', 'test document with', 'with multiple', 'multiple words.']
         # Note the 'test', 'with', and 'multiple' appear in consecutive chunks
     """
+    # Validate parameters to prevent infinite loops
+    if overlap >= size:
+        raise ValueError(f"Overlap ({overlap}) must be less than chunk size ({size})")
+    if size <= 0:
+        raise ValueError(f"Chunk size must be positive, got {size}")
+
     chunks = []
     start = 0
     text_len = len(text)
@@ -98,10 +112,18 @@ def chunk_text(text: str, size: int = 800, overlap: int = 100):
         if chunk:  # Only add non-empty chunks (skip whitespace-only chunks)
             chunks.append(chunk)
 
+        # If we've reached the end of the text, we're done
+        if end >= text_len:
+            break
+
         # Move start position for next chunk, accounting for overlap
-        # The max() ensures we always make forward progress, even with small chunks
-        # Without max(), we could get stuck in an infinite loop
-        start = max(start + 1, end - overlap)
+        next_start = end - overlap
+
+        # Ensure we always advance by at least 1 character to prevent infinite loops
+        if next_start <= start:
+            next_start = start + 1
+
+        start = next_start
 
     return chunks
 
@@ -152,6 +174,10 @@ def ingest_file(conn: psycopg.Connection, path: Path):
 
         # Step 4 & 5: Create chunk and embedding records
         for i, chunk in enumerate(chunks):
+            # Skip empty chunks to avoid wasting storage and processing
+            if not chunk or not chunk.strip():
+                continue
+
             # Insert chunk record with its position in the document
             cur.execute(
                 "INSERT INTO chunks (document_id, chunk_index, text) VALUES (%s, %s, %s) RETURNING id",
@@ -168,4 +194,4 @@ def ingest_file(conn: psycopg.Connection, path: Path):
 
     # Commit the transaction to make chunks visible to workers
     conn.commit()
-    print(f"📥 {path.name}: {len(chunks)} chunks staged (awaiting embedding).")
+    logger.info(f"📥 {path.name}: {len(chunks)} chunks staged (awaiting embedding).")

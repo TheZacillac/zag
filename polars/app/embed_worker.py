@@ -16,12 +16,24 @@ The worker is designed to be run as a long-lived service (e.g., in Docker).
 Multiple instances can run concurrently thanks to the row-level locking strategy.
 """
 
+import logging
 import os, time, httpx, psycopg
 from psycopg_pool import ConnectionPool
 from typing import Iterable, List, Sequence, Tuple
 
+from vector_utils import to_pgvector
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Configuration from environment variables with sensible defaults
 DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise ValueError("DATABASE_URL environment variable is required")
 OLLAMA = os.getenv("OLLAMA_HOST", "http://192.168.7.215:11434")  # Ollama API endpoint
 EMBED_MODEL = os.getenv("EMBED_MODEL", "embeddinggemma")  # Model must match query embedding
 BATCH_SIZE = int(os.getenv("EMBED_BATCH", "64"))  # Chunks to process per iteration
@@ -106,15 +118,15 @@ def write_back(conn: psycopg.Connection, ids: Sequence[int], vecs: Sequence[Sequ
         ids: List of chunk IDs (must match length of vecs)
         vecs: List of embedding vectors (each vector is a list of floats)
 
-    Note: PostgreSQL automatically converts the Python list to the VECTOR type
-    defined in the embeddings table schema.
+    Note: Vectors are converted to the pgvector textual format before being
+    stored, ensuring compatibility without requiring custom adapters.
     """
     with conn.cursor() as cur:
         # Use executemany for efficient batch updates
         # Each embedding vector is paired with its corresponding chunk_id
         cur.executemany(
-            "UPDATE embeddings SET embedding = %s WHERE chunk_id = %s",
-            [(v, cid) for cid, v in zip(ids, vecs)],
+            "UPDATE embeddings SET embedding = %s::vector WHERE chunk_id = %s",
+            [(to_pgvector(v), cid) for cid, v in zip(ids, vecs)],
         )
     # Commit the transaction to release the row locks acquired by FOR UPDATE
     conn.commit()
@@ -135,11 +147,12 @@ def main():
     - HTTP errors: Longer sleep (Ollama might be down or restarting)
     - DB errors: Longer sleep (database might be under maintenance)
     """
-    print(f"⚙️ Embed worker started (batch={BATCH_SIZE}, sleep={SLEEP_SEC}s, timeout={REQUEST_TIMEOUT}s)")
+    logger.info(f"⚙️ Embed worker started (batch={BATCH_SIZE}, sleep={SLEEP_SEC}s, timeout={REQUEST_TIMEOUT}s)")
 
-    # Create connection pool with 1-4 connections
+    # Create connection pool with 1-4 connections and 30s acquisition timeout
     # This is more efficient than opening/closing connections each iteration
-    with ConnectionPool(DB_URL, min_size=1, max_size=4) as pool:
+    # The timeout prevents deadlocks under high load
+    with ConnectionPool(DB_URL, min_size=1, max_size=4, timeout=30) as pool:
         with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
             while True:
                 try:
@@ -160,24 +173,25 @@ def main():
 
                         # Step 4: Write embeddings to database and commit
                         write_back(conn, ids, vectors)
-                        print(f"✅ Embedded {len(ids)} chunks")
+                        logger.info(f"✅ Embedded {len(ids)} chunks")
 
                 # Error handling: Different strategies for different error types
                 except httpx.TimeoutException as e:
                     # Ollama is slow but likely still working - short retry delay
-                    print(f"⏱️ Embedding timeout (model may be slow): {e}")
+                    logger.warning(f"⏱️ Embedding timeout (model may be slow): {e}")
                     time.sleep(SLEEP_SEC)
                 except httpx.HTTPError as e:
                     # Network or Ollama API error - longer delay before retry
-                    print(f"🌐 HTTP error communicating with Ollama: {e}")
+                    logger.error(f"🌐 HTTP error communicating with Ollama: {e}")
                     time.sleep(30)
                 except psycopg.OperationalError as e:
                     # Database connection issue - longer delay before retry
-                    print(f"💾 Database connection error: {e}")
+                    logger.error(f"💾 Database connection error: {e}")
                     time.sleep(30)
                 except Exception as e:
-                    # Unexpected error - log and continue with moderate delay
-                    print(f"💥 Unexpected error: {e}")
+                    # Unexpected error - log with traceback and continue with moderate delay
+                    chunk_preview = ids[:5] if 'ids' in locals() else 'unknown'
+                    logger.exception(f"💥 Unexpected error processing chunks {chunk_preview}: {e}")
                     time.sleep(10)
 
 if __name__ == "__main__":

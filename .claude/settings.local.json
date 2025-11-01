@@ -13,7 +13,14 @@
       "Bash(docker exec:*)",
       "Bash(docker inspect:*)",
       "Read(//home/zacr/**)",
-      "Bash(docker logs:*)"
+      "Bash(docker logs:*)",
+      "Bash(xargs:*)",
+      "Bash(grep:*)",
+      "Bash(git mv:*)",
+      "Bash(docker restart:*)",
+      "Bash(docker stop:*)",
+      "Bash(docker start:*)",
+      "Bash(docker ps:*)"
     ],
     "deny": [],
     "ask": []
